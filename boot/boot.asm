@@ -1,147 +1,213 @@
 [org 0x7C00]
 [bits 16]
 
-KERNEL_OFFSET equ 0x1000
-MAX_SECTORS equ 128
-SECTORS_PER_TRACK equ 18
+; Constants
+KERNEL_OFFSET equ 0x1000        ; Where to load kernel in memory
+KERNEL_SECTORS equ 64           ; Number of sectors to load (32KB kernel)
 
 start:
- cli
- xor ax, ax
- mov ds, ax
- mov es, ax
- mov ss, ax
- mov sp, 0x7C00
- sti
+    ; Clear interrupts and set up segments
+    cli
+    xor ax, ax
+    mov ds, ax
+    mov es, ax
+    mov ss, ax
+    mov sp, 0x7C00                  ; Stack grows down from bootloader
+    sti
 
- mov ax, 0x0003
- int 0x10
+    ; Clear screen and set video mode
+    mov ax, 0x0003                  ; 80x25 text mode
+    int 0x10
 
- mov si, loading_msg
- call print
+    ; Save boot drive
+    mov [boot_drive], dl
 
- mov bx, KERNEL_OFFSET
- mov dl, [boot_drive]
- mov dh, 0
- mov ch, 0
- mov cl, 2
+    ; Print loading message
+    mov si, loading_msg
+    call print_string
 
-.load_kernel:
- mov al, SECTORS_PER_TRACK
- cmp [sectors_remaining], al
- jge .read_sectors
- mov al, [sectors_remaining]
+    ; Load kernel from disk
+    call load_kernel
 
-.read_sectors:
- mov ah, 0x02
- int 0x13
- jnc .read_success
+    ; Print success message
+    mov si, loaded_msg
+    call print_string
 
- mov si, error_msg
- call print
- mov dx, ax
- call print_hex
- jmp halt
+    ; Switch to protected mode
+    cli
+    call enable_a20
+    lgdt [gdt_descriptor]
+    mov eax, cr0
+    or eax, 0x1
+    mov cr0, eax
+    
+    ; Far jump to flush pipeline and enter protected mode
+    jmp 0x08:protected_mode
 
-.read_success:
- sub [sectors_remaining], al
- jz .done_loading
+;===============================================================================
+; Load kernel from disk
+;===============================================================================
+load_kernel:
+    pusha
+    
+    ; Set up disk read parameters
+    mov bx, KERNEL_OFFSET           ; Destination buffer
+    mov dh, 0                       ; Head 0
+    mov dl, [boot_drive]            ; Drive number
+    mov ch, 0                       ; Cylinder 0
+    mov cl, 2                       ; Start from sector 2 (after boot sector)
+    mov al, KERNEL_SECTORS          ; Number of sectors to read
+    
+    ; Read sectors
+    mov ah, 0x02                    ; BIOS read function
+    int 0x13                        ; Call BIOS
+    
+    jc disk_error                   ; Jump if carry flag set (error)
+    
+    ; Verify we read the right number of sectors
+    cmp al, KERNEL_SECTORS
+    jne disk_error
+    
+    popa
+    ret
 
- add cl, al
- cmp cl, SECTORS_PER_TRACK + 1
- jle .next_sector
- mov cl, 1
- xor dh, 1 
- jnz .next_sector
- inc ch
+disk_error:
+    mov si, disk_error_msg
+    call print_string
+    
+    ; Print error code
+    mov ah, 0x01                    ; Get last disk status
+    int 0x13
+    call print_hex_byte
+    
+    ; Hang system
+    cli
+    hlt
 
-.next_sector:
- movzx dx, al
- shl dx, 9
- add bx, dx
- jmp .load_kernel
-
-.done_loading:
- mov si, done_msg
- call print
-
- cli
- mov al, 0xD1
- out 0x64, al
- mov al, 0xDF
- out 0x60, al
-
- lgdt [gdt_descriptor]
- mov eax, cr0
- or eax, 1
- mov cr0, eax
- jmp 0x08:protected_mode_entry
-
-print:
- lodsb
- or al, al
- jz .done
- mov ah, 0x0E
- int 0x10
- jmp print
+;===============================================================================
+; Print string (SI = string address, null terminated)
+;===============================================================================
+print_string:
+    pusha
+    mov ah, 0x0E                    ; BIOS teletype function
+.loop:
+    lodsb                           ; Load byte from SI into AL
+    cmp al, 0                       ; Check for null terminator
+    je .done
+    int 0x10                        ; Print character
+    jmp .loop
 .done:
- ret
+    popa
+    ret
 
-print_hex:
- mov cx, 4
-.hex_loop:
- rol dx, 4
- mov al, dl
- and al, 0xF
- add al, '0'
- cmp al, '9'
- jbe .print_char
- add al, 7
-.print_char:
- mov ah, 0x0E
- int 0x10
- loop .hex_loop
- ret
+;===============================================================================
+; Print hex byte (AL = byte to print)
+;===============================================================================
+print_hex_byte:
+    pusha
+    mov ah, 0x0E
+    
+    ; Print high nibble
+    mov bl, al
+    shr bl, 4
+    and bl, 0x0F
+    add bl, '0'
+    cmp bl, '9'
+    jle .print_high
+    add bl, 7                       ; Convert to A-F
+.print_high:
+    mov al, bl
+    int 0x10
+    
+    ; Print low nibble
+    mov bl, al
+    and bl, 0x0F
+    add bl, '0'
+    cmp bl, '9'
+    jle .print_low
+    add bl, 7                       ; Convert to A-F
+.print_low:
+    mov al, bl
+    int 0x10
+    
+    popa
+    ret
 
-halt:
- cli
- hlt
+;===============================================================================
+; Enable A20 line (required for protected mode)
+;===============================================================================
+enable_a20:
+    pusha
+    
+    ; Try fast A20 method first
+    in al, 0x92
+    test al, 2
+    jnz .done
+    or al, 2
+    and al, 0xFE
+    out 0x92, al
+    
+.done:
+    popa
+    ret
 
+;===============================================================================
+; Protected mode entry point
+;===============================================================================
 [bits 32]
-protected_mode_entry:
- mov ax, 0x10
- mov ds, ax
- mov es, ax
- mov ss, ax
- mov esp, 0x90000
- jmp KERNEL_OFFSET
+protected_mode:
+    ; Set up protected mode segments
+    mov ax, 0x10                    ; Data segment selector
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    mov esp, 0x90000                ; Set up stack in protected mode
+    
+    ; Jump to kernel
+    jmp KERNEL_OFFSET
 
+;===============================================================================
+; Global Descriptor Table
+;===============================================================================
 gdt_start:
- dq 0x0
- dw 0xFFFF
- dw 0x0000
- db 0x00
- db 0x9A
- db 0xCF
- db 0x00
- dw 0xFFFF
- dw 0x0000
- db 0x00
- db 0x92
- db 0xCF
- db 0x00
+    ; Null descriptor
+    dd 0x0
+    dd 0x0
+    
+    ; Code segment descriptor
+    dw 0xFFFF                       ; Limit (bits 0-15)
+    dw 0x0000                       ; Base (bits 0-15)
+    db 0x00                         ; Base (bits 16-23)
+    db 0x9A                         ; Access byte (present, ring 0, executable, readable)
+    db 0xCF                         ; Flags and limit (bits 16-19)
+    db 0x00                         ; Base (bits 24-31)
+    
+    ; Data segment descriptor
+    dw 0xFFFF                       ; Limit (bits 0-15)
+    dw 0x0000                       ; Base (bits 0-15)
+    db 0x00                         ; Base (bits 16-23)
+    db 0x92                         ; Access byte (present, ring 0, writable)
+    db 0xCF                         ; Flags and limit (bits 16-19)
+    db 0x00                         ; Base (bits 24-31)
 gdt_end:
 
 gdt_descriptor:
- dw gdt_end - gdt_start - 1
- dd gdt_start
+    dw gdt_end - gdt_start - 1      ; Size of GDT
+    dd gdt_start                    ; Address of GDT
 
-section .data
-loading_msg db "Loading kernel...", 0
-done_msg db "OK", 0x0D, 0x0A, 0
-error_msg db "Disk error: ", 0
-sectors_remaining dw MAX_SECTORS
-boot_drive db 0
+;===============================================================================
+; Data section
+;===============================================================================
+loading_msg     db 'Loading BasedOS kernel...', 0x0D, 0x0A, 0
+loaded_msg      db 'Kernel loaded successfully!', 0x0D, 0x0A, 0
+disk_error_msg  db 'Disk read error: ', 0
 
-times 510-($-$$) db 0
-dw 0xAA55
+boot_drive      db 0
+
+;===============================================================================
+; Boot sector padding and signature
+;===============================================================================
+times 510-($-$$) db 0               ; Pad to 510 bytes
+dw 0xAA55                           ; Boot signature
