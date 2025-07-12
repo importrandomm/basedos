@@ -114,3 +114,13 @@ asm (
     "    popa\n"
     "    iret\n"
 );
+
+// Register an interrupt handler
+void register_interrupt_handler(uint8_t n, void (*handler)(void)) {
+    uint32_t handler_addr = (uint32_t)handler;
+    idt[n].base_lo = handler_addr & 0xFFFF;
+    idt[n].base_hi = (handler_addr >> 16) & 0xFFFF;
+    idt[n].sel = 0x08; // Kernel code segment
+    idt[n].always0 = 0;
+    idt[n].flags = 0x8E; // Present, ring 0, interrupt gate
+}

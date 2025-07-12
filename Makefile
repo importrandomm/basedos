@@ -2,18 +2,20 @@ ASM = nasm
 CC = gcc
 LD = ld
 QEMU = qemu-system-i386
-CFLAGS = -ffreestanding -nostdlib -nostdinc -fno-builtin -fno-stack-protector -Wall -Wextra -std=gnu99 -m32 -I. -fno-pie -fno-pic
+CFLAGS = -ffreestanding -nostdlib -nostdinc -fno-builtin -fno-stack-protector -Wall -Wextra -std=gnu99 -m32 -I. -I./include -I./include/sys -I./include/fs -I./kernel -fno-pie -fno-pic
 ASFLAGS = -f elf32
 LDFLAGS = -m elf_i386 -T linker.ld --oformat binary
 OBJECTS = \
 	kernel/entry.o \
-	kernel/ports.o \
-	kernel/io.o \
+	kernel/terminal.o \
 	kernel/interrupts.o \
 	kernel/sound.o \
 	kernel/shell.o \
 	kernel/kernel.o \
 	kernel/memory.o \
+	fs/vfs.o \
+	fs/memfs.o \
+	fs/fs_test.o \
 	lib/stdio.o \
 	lib/string.o
 
